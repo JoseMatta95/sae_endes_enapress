@@ -2,11 +2,16 @@ library(tidyverse)
 library(purrr)
 library(sf)
 library(janitor)
+library(survey)
 
 source("./functions.R")
 
+# 1. ENDES ----
+
+## ANEMIA: Extraccion de datos ----
+
 # ENDES 2016-2019
-period<- 2016:2019
+period<- 2017:2019
 
 anemia_1<-
   map_df(
@@ -19,7 +24,8 @@ anemia_1<-
   clean_names() %>% 
   select(year,caseid,hw53,hw57) %>% 
   mutate(
-    hhid = str_sub(caseid, -9,-4),
+    hhid = str_extract(caseid, "\\d+\\s+\\d+$") %>%
+      str_remove("\\s+\\d+$"),
     hb = hw53*0.1
   ) %>% 
   haven::zap_labels()
@@ -38,7 +44,8 @@ anemia_2<-
   clean_names() %>% 
   select(year,caseid,hw53,hw57) %>% 
   mutate(
-    hhid = str_sub(caseid, -9,-4),
+    hhid = str_extract(caseid, "\\d+\\s+\\d+$") %>%
+      str_remove("\\s+\\d+$"),
     hb = hw53*0.1
   ) %>% 
   haven::zap_labels()
@@ -60,7 +67,8 @@ anemia_3<-
   clean_names() %>% 
   select(year,caseid,hw53,hw57) %>% 
   mutate(
-    hhid = str_sub(caseid, -9,-4),
+    hhid = str_extract(caseid, "\\d+\\s+\\d+$") %>%
+      str_remove("\\s+\\d+$"),
     hb = hw53*0.1
   ) %>% 
   haven::zap_labels()
@@ -74,6 +82,40 @@ df_anemia<-
   anemia_2,
   anemia_3
 ) %>% 
-  select(year,caseid,hhid,hb,hw57)
+  select(year,hhid,caseid,hb,hw57) %>% 
+  mutate(
+    hhid = as.numeric(hhid)
+  )
+
+
+
+## ANEMIA: Creacion de objetos survey
+
+key_endes <- read.csv("./data/key_endes_2016_2024.csv") %>% as_tibble()
+
+
+endes_anemia_svy<-
+  
+  df_anemia %>% 
+  left_join(key_endes, by = c("year","hhid")) %>% 
+  #group_by(caseid) %>%
+  #mutate(row_num = row_number()) %>%
+  #filter(row_num == 1 | row_num == 2) %>%   
+  #slice_tail(n = 1) %>%                      
+  group_by(year) %>% 
+  nest() %>% 
+  
+  mutate(
+    svy_data = map(.x = data,
+                   .f = ~svydesign(ids = ~hv001, strata = ~hv022, 
+                                   weights = ~hv005, data = .x, nest = T))
+  )
+  
+  
+  
+
+
+
+
 
 
