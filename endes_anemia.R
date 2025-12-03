@@ -84,7 +84,11 @@ df_anemia<-
 ) %>% 
   select(year,hhid,caseid,hb,hw57) %>% 
   mutate(
-    hhid = as.numeric(hhid)
+    hhid = as.numeric(hhid),
+    hw57 = as.factor(hw57)
+  ) %>% 
+  filter(
+    !is.na(hw57)
   )
 
 
@@ -93,7 +97,7 @@ df_anemia<-
 
 key_endes <- read.csv("./data/key_endes_2016_2024.csv") %>% as_tibble()
 
-
+options(survey.lonely.psu = "adjust") # solucion para cuando hay solo un elemento en una PSU
 endes_anemia_svy<-
   
   df_anemia %>% 
@@ -106,14 +110,19 @@ endes_anemia_svy<-
   nest() %>% 
   
   mutate(
-    svy_data = map(.x = data,
+    svy_data = map(.x = data, # objeto survey
                    .f = ~svydesign(ids = ~hv001, strata = ~hv022, 
-                                   weights = ~hv005, data = .x, nest = T))
+                                   weights = ~hv005, data = .x, nest = T)),
+    
+    
+    anemia_prop = map(svy_data, 
+                      ~ svyby(~hw57, ~ubigeo, design = .x,
+                                        FUN = svymean, keep.var = TRUE))
   )
   
-  
-  
-
+ 
+# estimaciones directas de la categoria HW57 - prueba 
+endes_anemia_svy$anemia_prop[[1]] %>% as_tibble()
 
 
 
