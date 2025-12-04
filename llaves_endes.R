@@ -1,5 +1,7 @@
 # LLAVE PARA ENDES 2016-2019
 
+source("./functions.R")
+
 key_1<-
   map_df(.x = c(2017:2019),
          .f = ~consulta_endes2(periodo = .x, codigo_modulo = 65, base = "RECH23") %>% 
