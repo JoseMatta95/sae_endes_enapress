@@ -12,6 +12,8 @@ source("./functions.R")
 
 key_endes <- read.csv("./data/key_endes_2016_2024.csv") %>% as_tibble()
 
+pca_censo2017 <- read.csv("./data/censo_2017_pca_25.csv") %>% mutate(ubigeo = as.character(ubigeo))
+
 pop_landscan2_dist <- read.csv("./data/pop_data/landscan_pop.csv") %>% as_tibble()
 distritos<- sf::st_read("./data/pop_data/districts/DISTRITOS.shp") %>% clean_names() %>% st_make_valid()
 
@@ -161,6 +163,8 @@ data_final <-
                 ubigeo = as.character(str_pad(ubigeo, width = 6, pad = "0"))
               )) %>% 
   
+  left_join(pca_censo2017) %>% 
+  
   
   mutate(
     count_anemia = round(hw57_cat * pop_landscan),
@@ -289,6 +293,27 @@ m5 <-
   )
 
 
+m6 <-
+  inla(
+    
+    formula =  count_anemia ~ 1 + pc1 + pc2 + 
+      pc20 + pc21 + pc22 + pc23 + pc24 +
+      
+      f(id.sp_dist, model = "bym2", graph = w.peru_dist) +
+      f(id.sp_dep, model = "bym2", graph = w.peru_dep) +
+      f(year_re, model = "ar1") +
+      f(id.sp_dep2, model = "bym2", graph = w.peru_dep, group = year_re,
+        control.group = list(model = "ar1")),
+    
+    data = data_final,
+    family = "nbinomial",
+    offset = log(pop_landscan),  
+    
+    control.predictor = list(compute = TRUE, link = 1),
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE, config = TRUE)
+  )
+
+
 ## evaluar 
 
 df_eval <-
@@ -298,13 +323,33 @@ df_eval <-
     m2_pred = m2$summary.fitted.values$mean, # solo con distrito
     m3_pred = m3$summary.fitted.values$mean, # distr y dep + interaccion distrito -tiempo
     m4_pred = m4$summary.fitted.values$mean, # solo interacciones
-    m5_pred = m4$summary.fitted.values$mean, # distr y dep + interaccion departamento - tiempo
+    m5_pred = m5$summary.fitted.values$mean, # distr y dep + interaccion departamento - tiempo
+    m6_pred = m6$summary.fitted.values$mean
+    ) 
+
+write.csv(df_eval, "./data/final_data/df_pred_anemia_count.csv", row.names = F)
+
+
+df_eval_prop <-
+  data_final %>% 
+  mutate(
+    m1_pred = m1$summary.fitted.values$mean, # con distirto y departamento como v. aleatoria
+    m2_pred = m2$summary.fitted.values$mean, # solo con distrito
+    m3_pred = m3$summary.fitted.values$mean, # distr y dep + interaccion distrito -tiempo
+    m4_pred = m4$summary.fitted.values$mean, # solo interacciones
+    m5_pred = m5$summary.fitted.values$mean, # distr y dep + interaccion departamento - tiempo
+    m6_pred = m6$summary.fitted.values$mean
+  ) %>% 
   
-    )
+  mutate(
+    across(m1_pred:m6_pred, .f = ~(.x/pop_landscan))
+  )
+
+write.csv(df_eval, "./data/final_data/df_pred_anemia_prop.csv", row.names = F)
 
 
 df_eval %>% 
-  select(year,count_anemia,m1_pred,m2_pred,m3_pred,m4_pred,m5_pred) %>% 
+  select(year,count_anemia,m1_pred,m2_pred,m3_pred,m4_pred,m5_pred,m6_pred) %>% 
   filter(!is.na(count_anemia)) %>%
   rename(directo = count_anemia) %>%
   pivot_longer(cols = starts_with("m"),
@@ -324,17 +369,17 @@ df_eval %>%
 
 
 data.frame(
-  Modelo = c("m1","m2","m3","m4","m5"),
-  DIC = c(m1$dic$dic, m2$dic$dic,m3$dic$dic,m4$dic$dic,m5$dic$dic),
-  WAIC = c(m1$waic$waic,m2$waic$waic,m3$waic$waic,m4$waic$waic,m5$waic$waic)
+  Modelo = c("m1","m2","m3","m4","m5","m6"),
+  DIC = c(m1$dic$dic, m2$dic$dic,m3$dic$dic,m4$dic$dic,m5$dic$dic,m6$dic$dic),
+  WAIC = c(m1$waic$waic,m2$waic$waic,m3$waic$waic,m4$waic$waic,m5$waic$waic,m6$waic$waic)
 )
 
 ## Performance metrics ----
 
 fitted_vals  <-  
   df_eval %>% 
-  select(year,ubigeo,m1_pred:m5_pred,count_anemia) %>% 
-  pivot_longer(cols = c(m1_pred:m5_pred), values_to = "fit", names_to = "modelo") %>% 
+  select(year,ubigeo,m1_pred:m6_pred,count_anemia) %>% 
+  pivot_longer(cols = c(m1_pred:m6_pred), values_to = "fit", names_to = "modelo") %>% 
   mutate(
     actual = count_anemia
   )
@@ -347,6 +392,7 @@ perform.metrics.dist <- yardstick::metric_set(mae,smape,rmse)
 tbl.yrd.full <-  fitted_vals %>% 
   group_by(modelo) %>%
   perform.metrics(truth = actual, estimate = fit)
+
 ##### metrics by districts----
 tbl.yrd.dist_count <-  fitted_vals %>% 
   group_by(modelo,ubigeo) %>%
@@ -368,3 +414,4 @@ tbl.yrd.full %>%
       rows = modelo %in% c("fit8_spat_2","fit10_spat_2","fit2_spat_2")
     )
   )
+
