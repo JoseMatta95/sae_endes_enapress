@@ -1,0 +1,268 @@
+---
+title: "Untitled"
+author: "Gaby"
+date: "2026-01-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+```{r}
+library(tidyverse)
+library(purrr)
+library(sf)
+library(janitor)
+library(survey)
+library(INLA)
+library(spdep)
+library(yardstick)
+library(gt)
+```
+
+
+```{r}
+source("./functions.R")
+
+key_endes <- read.csv("./data/key_endes_2016_2024.csv") %>% as_tibble()
+
+pca_censo2017 <- read.csv("./data/censo_2017_pca_25.csv") %>% mutate(ubigeo = as.character(ubigeo))
+
+pop_landscan2_dist <- read.csv("./data/pop_data/landscan_pop.csv") %>% as_tibble()
+distritos<- sf::st_read("./data/pop_data/districts/DISTRITOS.shp") %>% clean_names() %>% st_make_valid()
+
+departamento <- sf::st_read("./data/pop_data/departamento_shapefile/SHPCensoDepartamento INEI 2007 geogpsperu SuyoPomalia.shp") %>% 
+  clean_names() %>% 
+  filter(id_0!=299) %>% 
+  mutate(departamento = ifelse(name_1 == "Provincia Constitucional del Callao", 
+                               "Lima", name_1)) %>%
+  group_by(departamento) %>%
+  summarise(geometry = st_union(geometry)) %>%
+  ungroup()
+
+```
+
+
+
+```{r}
+# ENDES 2016-2019
+period<- 2017:2019
+
+desnutricion_1<-
+  map_df(
+  .x = period,
+  .f = ~ consulta_endes2(periodo = .x, base = "REC44", codigo_modulo ="74" ) %>% 
+    mutate(
+      year = .x
+    )
+) %>% 
+  clean_names() %>% 
+  select(year,caseid,hw70,hw72) %>% 
+  mutate(
+    hhid = str_extract(caseid, "\\d+\\s+\\d+$") %>%
+      str_remove("\\s+\\d+$")
+  ) %>% 
+  haven::zap_labels()
+
+# ENDES 2020-2022
+period<- c(2020:2022)
+
+desnutricion_2<-
+  map_df(
+    .x = period,
+    .f = ~ consulta_endes2(periodo = .x, base = "REC44", codigo_modulo ="1638" ) %>% 
+      mutate(
+        year = .x
+      )
+  ) %>% 
+  clean_names() %>% 
+  select(year,caseid,hw70,hw72) %>% 
+  mutate(
+    hhid = str_extract(caseid, "\\d+\\s+\\d+$") %>%
+      str_remove("\\s+\\d+$")
+  ) %>% 
+  haven::zap_labels()
+
+# # ENDES 2023-2024
+
+period<- c(2023:2024)
+
+desnutricion_3<-
+  map_df(
+    .x = period,
+    .f = ~ consulta_endes2(periodo = .x, 
+                           base = paste0("REC44_", .x), 
+                           codigo_modulo ="1638" ) %>% 
+      mutate(
+        year = .x
+      )
+  ) %>% 
+  clean_names() %>% 
+  select(year,caseid,hw70,hw72) %>% 
+  mutate(
+    hhid = str_extract(caseid, "\\d+\\s+\\d+$") %>%
+      str_remove("\\s+\\d+$")
+  ) %>% 
+  haven::zap_labels()
+
+
+# Uniendo todo
+
+df_anemia<-
+  bind_rows(
+  desnutricion_1,
+  desnutricion_2,
+  desnutricion_3
+) %>% 
+  select(year,hhid,caseid,hw70,hw72) %>% 
+  mutate(
+    hhid = as.numeric(hhid),
+    hw70 = as.factor(hw70),
+    desnutricion_cronica = ifelse(hw70 == -2,1,0)
+  ) %>% 
+  filter(
+    !is.na(hw70)
+  )
+```
+
+
+```{r}
+
+## DESNUTRICIÓN: Creacion de objetos survey
+
+options(survey.lonely.psu = "adjust") # solucion para cuando hay solo un elemento en una PSU
+endes_desnutricion_svy<-
+  
+  df_anemia %>% 
+  left_join(key_endes, by = c("year","hhid")) %>% 
+  #group_by(caseid) %>%
+  #mutate(row_num = row_number()) %>%
+  #filter(row_num == 1 | row_num == 2) %>%   
+  #slice_tail(n = 1) %>%                      
+  group_by(year) %>% 
+  nest() %>% 
+  
+  mutate(
+    svy_data = map(.x = data, # objeto survey
+                   .f = ~svydesign(ids = ~hv001, strata = ~hv022, 
+                                   weights = ~hv005, data = .x, nest = T)),
+    
+    
+    desnutricion_prop = map(svy_data, 
+                      ~ svyby(~desnutricion_cronica, ~ubigeo, design = .x,
+                                        FUN = svymean, keep.var = TRUE))
+  )
+  
+ 
+### Estimaciones directas de la categoria HW57 - prueba ----
+data_final <-
+  
+  pop_landscan2_dist %>% 
+  rename(
+    ubigeo = iddist
+  ) %>% 
+  mutate(
+    ubigeo = as.character(ubigeo),
+    ubigeo = as.character(str_pad(ubigeo, width = 6, pad = "0"))
+  ) %>% 
+  left_join(endes_desnutricion_svy %>% 
+              select(year,desnutricion_prop) %>%
+              ungroup() %>% 
+              unnest(cols = c(desnutricion_prop)) %>% 
+              filter(!year %in% c(2024)) %>% 
+              mutate(
+                #year = as.character(year),
+                ubigeo = as.character(str_pad(ubigeo, width = 6, pad = "0"))
+              )) %>% 
+  
+  left_join(pca_censo2017) %>% 
+  
+  
+  mutate(
+    count_desnutricion = round(desnutricion_cronica * pop_landscan),
+    dep = stringr::str_sub(ubigeo, 1, 2),
+    dep = ifelse(dep == "07", "15", dep)
+  ) %>% 
+  group_by(ubigeo) %>% 
+  mutate(
+    id.sp_dist = cur_group_id(),
+    id.sp_dist2 = cur_group_id()
+  ) %>% 
+  ungroup() %>% 
+  group_by(dep) %>% 
+  
+  mutate(
+    id.sp_dep = cur_group_id(),
+    id.sp_dep2 = cur_group_id()
+  ) %>% 
+  ungroup() %>% 
+  
+  mutate(
+    year_re = as.integer(as.factor(year))
+  )
+  
+```
+
+```{r}
+### V.A. espacial
+#### distirto
+peru.dist <- poly2nb(distritos)
+w.peru_dist <- nb2mat(peru.dist, style = "W", zero.policy = TRUE)
+
+### departamento
+peru.dep <- poly2nb(departamento)
+w.peru_dep <- nb2mat(peru.dep, style = "W")
+
+
+m6 <-
+  inla(
+    
+    formula =  count_desnutricion ~ 1 + pc1 + pc2 + 
+      pc20 + pc21 + pc22 + pc23 + pc24 +
+      
+      f(id.sp_dist, model = "bym2", graph = w.peru_dist) +
+      f(id.sp_dep, model = "bym2", graph = w.peru_dep) +
+      f(year_re, model = "ar1") +
+      f(id.sp_dep2, model = "bym2", graph = w.peru_dep, group = year_re,
+        control.group = list(model = "ar1")),
+    
+    data = data_final,
+    family = "nbinomial",
+    offset = log(pop_landscan),  
+    
+    control.predictor = list(compute = TRUE, link = 1),
+    control.compute = list(dic = TRUE, cpo = TRUE, waic = TRUE, config = TRUE)
+  )
+```
+```{r}
+df_eval_prop <-
+  data_final %>% 
+  mutate(
+    m6_pred = m6$summary.fitted.values$mean)
+
+write.csv(df_eval_prop, "./data/final_data/df_pred_desnutricion_prop.csv", row.names = F)
+
+```
+
